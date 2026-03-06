@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 )
 
@@ -17,6 +19,7 @@ func (p *Plugin) initRouter() *mux.Router {
 	apiRouter := router.PathPrefix("/api/v1").Subrouter()
 
 	apiRouter.HandleFunc("/hello", p.HelloWorld).Methods(http.MethodGet)
+	apiRouter.HandleFunc("/bots/status", p.BotsStatus).Methods(http.MethodGet)
 
 	return router
 }
@@ -37,6 +40,68 @@ func (p *Plugin) MattermostAuthorizationRequired(next http.Handler) http.Handler
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// BotsStatus re-attempts bot registration and returns a JSON summary of what
+// succeeded or failed. Useful for diagnosing configuration problems.
+// GET /plugins/com.mattermost.mattermost-trello/api/v1/bots/status
+func (p *Plugin) BotsStatus(w http.ResponseWriter, r *http.Request) {
+	cfg := p.getConfiguration()
+
+	type botResult struct {
+		Username    string `json:"username"`
+		DisplayName string `json:"displayName"`
+		UserID      string `json:"userId,omitempty"`
+		Error       string `json:"error,omitempty"`
+	}
+
+	botConfigs, parseErr := cfg.ParseBotConfigs()
+
+	var results []botResult
+
+	if parseErr != nil {
+		results = []botResult{{Error: "BotConfigurations JSON parse error: " + parseErr.Error()}}
+	} else if len(botConfigs) == 0 {
+		results = []botResult{{Error: "BotConfigurations is empty — paste your JSON array and save the plugin settings first"}}
+	} else {
+		for _, bc := range botConfigs {
+			res := botResult{Username: bc.BotUsername, DisplayName: bc.BotDisplayName}
+
+			botID, ensureErr := p.client.Bot.EnsureBot(&model.Bot{
+				Username:    bc.BotUsername,
+				DisplayName: bc.BotDisplayName,
+				Description: "Mattermost Trello Bot — creates and manages Trello cards from chat threads.",
+			})
+			if ensureErr != nil {
+				res.Error = ensureErr.Error()
+			} else {
+				res.UserID = botID
+				p.botMu.Lock()
+				p.botUserIDs[bc.BotUsername] = botID
+				p.botMu.Unlock()
+			}
+
+			results = append(results, res)
+		}
+	}
+
+	p.botMu.RLock()
+	registered := make(map[string]string)
+	for k, v := range p.botUserIDs {
+		registered[k] = v
+	}
+	p.botMu.RUnlock()
+
+	resp := map[string]interface{}{
+		"configuredBots":  len(botConfigs),
+		"results":         results,
+		"registeredInMem": registered,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		p.API.LogError("Failed to encode bots status response", "error", err.Error())
+	}
 }
 
 func (p *Plugin) HelloWorld(w http.ResponseWriter, r *http.Request) {
