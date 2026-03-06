@@ -15,9 +15,6 @@
             "windows-amd64": "server/dist/plugin-windows-amd64.exe"
         }
     },
-    "webapp": {
-        "bundle_path": "webapp/dist/main.js"
-    },
     "settings_schema": {
         "header": "Configure the Mattermost Trello Bot. Each bot maps to a specific Trello board and list. See the README for setup instructions.",
         "footer": "",
