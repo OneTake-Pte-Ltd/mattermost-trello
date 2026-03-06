@@ -1,7 +1,6 @@
 package trello
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -54,7 +53,12 @@ func (c *Client) CreateCard(listID, name, desc string) (*Card, error) {
 	params.Set("name", name)
 	params.Set("desc", desc)
 
-	resp, err := http.Post(baseURL+"/cards?"+params.Encode(), "application/json", nil)
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/cards?"+params.Encode(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("trello: failed to build create card request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("trello: failed to create card: %w", err)
 	}
@@ -81,7 +85,12 @@ func (c *Client) AddChecklist(cardID, checklistName string, items []string) erro
 	params.Set("idCard", cardID)
 	params.Set("name", checklistName)
 
-	resp, err := http.Post(baseURL+"/checklists?"+params.Encode(), "application/json", nil)
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/checklists?"+params.Encode(), nil)
+	if err != nil {
+		return fmt.Errorf("trello: failed to build create checklist request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("trello: failed to create checklist: %w", err)
 	}
@@ -106,18 +115,21 @@ func (c *Client) AddChecklist(cardID, checklistName string, items []string) erro
 		itemParams.Set("token", c.APIToken)
 		itemParams.Set("name", item)
 
-		itemResp, itemErr := http.Post(
-			fmt.Sprintf("%s/checklists/%s/checkItems?%s", baseURL, checklist.ID, itemParams.Encode()),
-			"application/json",
-			nil,
-		)
+		itemURL := fmt.Sprintf("%s/checklists/%s/checkItems?%s", baseURL, checklist.ID, itemParams.Encode())
+		itemReq, itemErr := http.NewRequest(http.MethodPost, itemURL, nil)
+		if itemErr != nil {
+			return fmt.Errorf("trello: failed to build add checklist item request for %q: %w", item, itemErr)
+		}
+
+		itemResp, itemErr := http.DefaultClient.Do(itemReq)
 		if itemErr != nil {
 			return fmt.Errorf("trello: failed to add checklist item %q: %w", item, itemErr)
 		}
-		itemResp.Body.Close()
+		statusCode := itemResp.StatusCode
+		_ = itemResp.Body.Close()
 
-		if itemResp.StatusCode >= 300 {
-			return fmt.Errorf("trello: add checklist item %q returned status %d", item, itemResp.StatusCode)
+		if statusCode >= 300 {
+			return fmt.Errorf("trello: add checklist item %q returned status %d", item, statusCode)
 		}
 	}
 
@@ -131,11 +143,16 @@ func (c *Client) AddComment(cardID, text string) error {
 	params.Set("token", c.APIToken)
 	params.Set("text", text)
 
-	resp, err := http.Post(
+	req, err := http.NewRequest(
+		http.MethodPost,
 		fmt.Sprintf("%s/cards/%s/actions/comments?%s", baseURL, cardID, params.Encode()),
-		"application/json",
-		bytes.NewReader(nil),
+		nil,
 	)
+	if err != nil {
+		return fmt.Errorf("trello: failed to build add comment request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("trello: failed to add comment: %w", err)
 	}
@@ -155,7 +172,16 @@ func (c *Client) GetCardWithChecklists(cardID string) (*CardDetail, error) {
 	params.Set("token", c.APIToken)
 	params.Set("checklists", "all")
 
-	resp, err := http.Get(fmt.Sprintf("%s/cards/%s?%s", baseURL, cardID, params.Encode()))
+	req, err := http.NewRequest(
+		http.MethodGet,
+		fmt.Sprintf("%s/cards/%s?%s", baseURL, cardID, params.Encode()),
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("trello: failed to build get card request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("trello: failed to get card: %w", err)
 	}
