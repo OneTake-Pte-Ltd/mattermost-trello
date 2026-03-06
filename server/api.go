@@ -20,6 +20,7 @@ func (p *Plugin) initRouter() *mux.Router {
 
 	apiRouter.HandleFunc("/hello", p.HelloWorld).Methods(http.MethodGet)
 	apiRouter.HandleFunc("/bots/status", p.BotsStatus).Methods(http.MethodGet)
+	apiRouter.HandleFunc("/version", p.Version).Methods(http.MethodGet)
 
 	return router
 }
@@ -101,6 +102,18 @@ func (p *Plugin) BotsStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		p.API.LogError("Failed to encode bots status response", "error", err.Error())
+	}
+}
+
+// buildTag is bumped on every meaningful release so admins can confirm
+// which binary is running via GET /api/v1/version.
+const buildTag = "v1.1.0"
+
+// Version returns the plugin build tag as JSON.
+func (p *Plugin) Version(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{"version": buildTag}); err != nil {
+		p.API.LogError("Failed to write version response", "error", err.Error())
 	}
 }
 

@@ -187,13 +187,16 @@ func (p *Plugin) ensureBots() error {
 	defer p.botMu.Unlock()
 
 	for _, bc := range botConfigs {
-		botID, ensureErr := p.client.Bot.EnsureBot(&model.Bot{
+		botID, appErr := p.API.EnsureBotUser(&model.Bot{
 			Username:    bc.BotUsername,
 			DisplayName: bc.BotDisplayName,
 			Description: "Mattermost Trello Bot — creates and manages Trello cards from chat threads.",
 		})
-		if ensureErr != nil {
-			p.API.LogError("Failed to ensure bot", "botUsername", bc.BotUsername, "error", ensureErr.Error())
+		if appErr != nil {
+			p.API.LogError("Failed to ensure bot user",
+				"botUsername", bc.BotUsername,
+				"statusCode", appErr.StatusCode,
+				"error", appErr.Error())
 			continue
 		}
 		p.botUserIDs[bc.BotUsername] = botID
