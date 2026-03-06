@@ -1,0 +1,62 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Determine plugin metadata
+        id: meta
+        run: |
+          PLUGIN_ID=$(python3 -c "import json; print(json.load(open('plugin.json'))['id'])")
+          VERSION=$(git describe --tags --match 'v*' --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")
+          echo "plugin_id=$PLUGIN_ID" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "bundle_name=${PLUGIN_ID}-${VERSION}.tar.gz" >> $GITHUB_OUTPUT
+
+      - name: Build server binaries
+        run: |
+          mkdir -p server/dist
+          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -o server/dist/plugin-linux-amd64   ./server
+          CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -o server/dist/plugin-linux-arm64   ./server
+          CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -trimpath -o server/dist/plugin-darwin-amd64  ./server
+          CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -o server/dist/plugin-darwin-arm64  ./server
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o server/dist/plugin-windows-amd64.exe ./server
+
+      - name: Bundle plugin
+        run: |
+          PLUGIN_ID="${{ steps.meta.outputs.plugin_id }}"
+          BUNDLE="${{ steps.meta.outputs.bundle_name }}"
+          mkdir -p dist/${PLUGIN_ID}/server
+          cp plugin.json dist/${PLUGIN_ID}/
+          cp -r assets  dist/${PLUGIN_ID}/
+          cp -r server/dist dist/${PLUGIN_ID}/server/
+          cd dist && tar -czf "../${BUNDLE}" "${PLUGIN_ID}"
+          echo "Built: ${BUNDLE}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin
+          path: "*.tar.gz"
+          retention-days: 30
+
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.tar.gz"
