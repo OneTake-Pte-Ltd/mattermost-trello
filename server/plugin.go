@@ -195,7 +195,6 @@ func (p *Plugin) ensureBots() error {
 		if appErr != nil {
 			p.API.LogError("Failed to ensure bot user",
 				"botUsername", bc.BotUsername,
-				"statusCode", appErr.StatusCode,
 				"error", appErr.Error())
 			continue
 		}
