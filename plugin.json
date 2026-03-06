@@ -1,9 +1,9 @@
 {
-    "id": "com.mattermost.plugin-starter-template",
-    "name": "Plugin Starter Template",
-    "description": "This plugin serves as a starting point for writing a Mattermost plugin.",
-    "homepage_url": "https://github.com/mattermost/mattermost-plugin-starter-template",
-    "support_url": "https://github.com/mattermost/mattermost-plugin-starter-template/issues",
+    "id": "com.mattermost.mattermost-trello",
+    "name": "Mattermost Trello Bot",
+    "description": "Integrates Mattermost with Trello via AI-powered bots that create and manage cards from chat threads.",
+    "homepage_url": "https://github.com/OneTake-Pte-Ltd/mattermost-trello",
+    "support_url": "https://github.com/OneTake-Pte-Ltd/mattermost-trello/issues",
     "icon_path": "assets/starter-template-icon.svg",
     "min_server_version": "6.2.1",
     "server": {
@@ -19,8 +19,24 @@
         "bundle_path": "webapp/dist/main.js"
     },
     "settings_schema": {
-        "header": "",
+        "header": "Configure the Mattermost Trello Bot. Each bot maps to a specific Trello board and list. See the README for setup instructions.",
         "footer": "",
-        "settings": []
+        "settings": [
+            {
+                "key": "AnthropicAPIKey",
+                "display_name": "Anthropic API Key",
+                "type": "text",
+                "help_text": "Your Anthropic API key (starting with sk-ant-...). Used by Claude to generate Trello card titles, descriptions, and checklists.",
+                "placeholder": "sk-ant-...",
+                "secret": true
+            },
+            {
+                "key": "BotConfigurations",
+                "display_name": "Bot Configurations (JSON)",
+                "type": "longtext",
+                "help_text": "A JSON array mapping bot usernames to Trello boards. Each entry must include: botUsername, botDisplayName, trelloApiKey, trelloApiToken, trelloBoardId, trelloListId. Example: [{\"botUsername\": \"therealpritish\", \"botDisplayName\": \"Pritish Bot\", \"trelloApiKey\": \"...\", \"trelloApiToken\": \"...\", \"trelloBoardId\": \"...\", \"trelloListId\": \"...\"}]",
+                "placeholder": "[]"
+            }
+        ]
     }
 }
