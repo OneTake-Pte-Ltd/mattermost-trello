@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 const (
@@ -134,10 +135,29 @@ func (c *Client) GenerateCardContent(userMessage, threadLink, model string, maxT
 		return nil, fmt.Errorf("anthropic: empty response content")
 	}
 
+	rawText := stripMarkdownFences(apiResp.Content[0].Text)
 	var card CardContent
-	if err = json.Unmarshal([]byte(apiResp.Content[0].Text), &card); err != nil {
+	if err = json.Unmarshal([]byte(rawText), &card); err != nil {
 		return nil, fmt.Errorf("anthropic: failed to parse card JSON from response: %w", err)
 	}
 
 	return &card, nil
+}
+
+// stripMarkdownFences removes ``` or ```json code fences that Claude sometimes adds
+// around the JSON response despite instructions to return bare JSON.
+func stripMarkdownFences(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "```") {
+		return s
+	}
+	// Drop the opening fence line (e.g. "```json" or "```").
+	if idx := strings.Index(s, "\n"); idx != -1 {
+		s = s[idx+1:]
+	}
+	// Drop the closing fence.
+	if idx := strings.LastIndex(s, "```"); idx != -1 {
+		s = s[:idx]
+	}
+	return strings.TrimSpace(s)
 }
