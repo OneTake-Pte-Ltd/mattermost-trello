@@ -9,11 +9,17 @@ import (
 )
 
 const (
-	apiURL           = "https://api.anthropic.com/v1/messages"
-	apiVersion       = "2023-06-01"
-	model            = "claude-sonnet-4-6"
-	maxTokens        = 1024
-	systemPrompt     = `You are a project management assistant that creates structured Trello cards from user messages.
+	apiURL      = "https://api.anthropic.com/v1/messages"
+	apiVersion  = "2023-06-01"
+
+	// DefaultModel and DefaultMaxTokens are used when the plugin settings leave these fields blank.
+	DefaultModel     = "claude-sonnet-4-6"
+	DefaultMaxTokens = 1024
+
+	// coreSystemPrompt contains the immutable JSON-output instructions that admins cannot override,
+	// ensuring the response format is always valid for Trello card creation.
+	// Any admin-supplied additional context is appended after this block at call time.
+	coreSystemPrompt = `You are a project management assistant that creates structured Trello cards from user messages.
 You must respond with ONLY a valid JSON object and nothing else — no prose, no markdown fences.
 The JSON object must have exactly these fields:
   "title"       – A concise card title, maximum 60 characters.
@@ -59,7 +65,24 @@ type anthropicResponse struct {
 
 // GenerateCardContent calls the Anthropic API and returns structured Trello card content
 // derived from the user's message.
-func (c *Client) GenerateCardContent(userMessage, threadLink string) (*CardContent, error) {
+//
+// model and maxTokens fall back to DefaultModel / DefaultMaxTokens when zero-valued.
+// additionalContext, if non-empty, is appended to the core system prompt so that
+// admin-supplied company/bot context reaches Claude without touching the JSON-output
+// instructions that must remain intact.
+func (c *Client) GenerateCardContent(userMessage, threadLink, model string, maxTokens int, additionalContext string) (*CardContent, error) {
+	if model == "" {
+		model = DefaultModel
+	}
+	if maxTokens <= 0 {
+		maxTokens = DefaultMaxTokens
+	}
+
+	systemPmt := coreSystemPrompt
+	if additionalContext != "" {
+		systemPmt += "\n\n" + additionalContext
+	}
+
 	userPrompt := fmt.Sprintf(
 		"Create a Trello card for the following issue. The Mattermost thread link is: %s\n\nIssue description: %s",
 		threadLink, userMessage,
@@ -68,7 +91,7 @@ func (c *Client) GenerateCardContent(userMessage, threadLink string) (*CardConte
 	reqBody := anthropicRequest{
 		Model:     model,
 		MaxTokens: maxTokens,
-		System:    systemPrompt,
+		System:    systemPmt,
 		Messages: []anthropicMessage{
 			{Role: "user", Content: userPrompt},
 		},

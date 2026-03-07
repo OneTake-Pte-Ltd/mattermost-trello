@@ -21,6 +21,13 @@ type BotConfig struct {
 	TrelloAPIToken string
 	TrelloBoardID  string
 	TrelloListID   string
+	// BotContext is optional per-bot context injected into Anthropic calls (appended after GlobalContext).
+	BotContext string
+	// Anthropic settings resolved from plugin configuration.
+	AnthropicAPIKey    string
+	AnthropicModel     string
+	AnthropicMaxTokens int
+	GlobalContext      string
 }
 
 // Handler processes bot-mention messages and coordinates Anthropic + Trello actions.
@@ -64,17 +71,26 @@ func (h *Handler) handleCreateCard(post *model.Post, botUserID, rootPostID, mess
 		return
 	}
 
-	anthropicKey := h.getAnthropicKey()
-	if anthropicKey == "" {
+	if cfg.AnthropicAPIKey == "" {
 		h.postAsBot(botUserID, post.ChannelId, rootPostID,
 			"I'm not set up yet — please ask an admin to configure the Anthropic API key.")
 		return
 	}
 
+	// Combine global and per-bot context; each part is only included if non-empty.
+	var contextParts []string
+	if cfg.GlobalContext != "" {
+		contextParts = append(contextParts, cfg.GlobalContext)
+	}
+	if cfg.BotContext != "" {
+		contextParts = append(contextParts, cfg.BotContext)
+	}
+	additionalContext := strings.Join(contextParts, "\n\n")
+
 	threadLink := h.buildThreadLink(post, rootPostID)
 
-	ac := &anthropic.Client{APIKey: anthropicKey}
-	content, err := ac.GenerateCardContent(messageText, threadLink)
+	ac := &anthropic.Client{APIKey: cfg.AnthropicAPIKey}
+	content, err := ac.GenerateCardContent(messageText, threadLink, cfg.AnthropicModel, cfg.AnthropicMaxTokens, additionalContext)
 	if err != nil {
 		h.API.LogError("Anthropic API error", "error", err.Error())
 		h.postAsBot(botUserID, post.ChannelId, rootPostID,
@@ -218,18 +234,6 @@ func (h *Handler) buildThreadLink(post *model.Post, rootPostID string) string {
 	}
 
 	return fmt.Sprintf("%s/%s/pl/%s", siteURL, team.Name, rootPostID)
-}
-
-// getAnthropicKey retrieves the Anthropic API key from the plugin configuration.
-func (h *Handler) getAnthropicKey() string {
-	var cfg struct {
-		AnthropicAPIKey string
-	}
-	if err := h.API.LoadPluginConfiguration(&cfg); err != nil {
-		h.API.LogError("Failed to load plugin configuration for Anthropic key", "error", err.Error())
-		return ""
-	}
-	return cfg.AnthropicAPIKey
 }
 
 // getPostAuthorUsername retrieves the username of the post author.

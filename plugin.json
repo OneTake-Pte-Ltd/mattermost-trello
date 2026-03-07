@@ -28,10 +28,31 @@
                 "secret": true
             },
             {
+                "key": "AnthropicModel",
+                "display_name": "Claude Model",
+                "type": "text",
+                "help_text": "The Claude model ID to use for card generation. Leave blank to use the default (claude-sonnet-4-6). Example: claude-opus-4-6",
+                "placeholder": "claude-sonnet-4-6"
+            },
+            {
+                "key": "AnthropicMaxTokens",
+                "display_name": "Max Tokens",
+                "type": "text",
+                "help_text": "Maximum number of tokens Claude may use per response. Leave blank to use the default (1024). Increase if bots with long context need longer card descriptions.",
+                "placeholder": "1024"
+            },
+            {
+                "key": "GlobalContext",
+                "display_name": "Global Context (all bots)",
+                "type": "longtext",
+                "help_text": "Optional. Free-text context injected into every Anthropic call across all bots, before any per-bot context. Use this to provide company-wide background — e.g. your company name, product overview, or terminology. The core JSON-output instructions are always preserved and cannot be overridden here.",
+                "placeholder": ""
+            },
+            {
                 "key": "BotConfigurations",
                 "display_name": "Bot Configurations (JSON)",
                 "type": "longtext",
-                "help_text": "A JSON array mapping bot usernames to Trello boards. Each entry must include: botUsername, botDisplayName, trelloApiKey, trelloApiToken, trelloBoardId, trelloListId. Example: [{\"botUsername\": \"therealpritish\", \"botDisplayName\": \"Pritish Bot\", \"trelloApiKey\": \"...\", \"trelloApiToken\": \"...\", \"trelloBoardId\": \"...\", \"trelloListId\": \"...\"}]",
+                "help_text": "A JSON array mapping bot usernames to Trello boards. Required fields per entry: botUsername, botDisplayName, trelloApiKey, trelloApiToken, trelloBoardId, trelloListId. Optional field: botContext (free-text describing this bot's role, personality, or style — appended after Global Context in every Anthropic call made by this bot). Example: [{\"botUsername\": \"therealpritish\", \"botDisplayName\": \"Pritish Bot\", \"trelloApiKey\": \"...\", \"trelloApiToken\": \"...\", \"trelloBoardId\": \"...\", \"trelloListId\": \"...\", \"botContext\": \"This bot handles engineering bugs. Be concise and technical.\"}]",
                 "placeholder": "[]"
             }
         ]
