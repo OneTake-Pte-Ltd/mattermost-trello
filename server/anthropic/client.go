@@ -6,27 +6,44 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 )
 
 const (
 	apiURL      = "https://api.anthropic.com/v1/messages"
 	apiVersion  = "2023-06-01"
+	toolName    = "create_trello_card"
 
 	// DefaultModel and DefaultMaxTokens are used when the plugin settings leave these fields blank.
 	DefaultModel     = "claude-sonnet-4-6"
 	DefaultMaxTokens = 1024
 
-	// coreSystemPrompt contains the immutable JSON-output instructions that admins cannot override,
-	// ensuring the response format is always valid for Trello card creation.
-	// Any admin-supplied additional context is appended after this block at call time.
-	coreSystemPrompt = `You are a project management assistant that creates structured Trello cards from user messages.
-You must respond with ONLY a valid JSON object and nothing else — no prose, no markdown fences.
-The JSON object must have exactly these fields:
-  "title"       – A concise card title, maximum 60 characters.
-  "description" – A clear description of the issue or task. Always include the Mattermost thread link provided by the user.
-  "checklist"   – An array of strings, each being a short, actionable checklist item (3–7 items).`
+	// coreSystemPrompt describes the assistant's role.  The output structure is enforced by the
+	// tool schema below rather than by prose instructions, so admins cannot accidentally break
+	// card parsing regardless of what they put in the additional-context fields.
+	coreSystemPrompt = `You are a project management assistant that creates structured Trello cards from Mattermost thread messages.`
 )
+
+// cardInputSchema is the JSON Schema used for the forced-tool-use call.
+// Using tool_choice forces Claude to always return valid JSON matching this schema.
+var cardInputSchema = json.RawMessage(`{
+	"type": "object",
+	"properties": {
+		"title": {
+			"type": "string",
+			"description": "A concise card title, maximum 60 characters."
+		},
+		"description": {
+			"type": "string",
+			"description": "A clear description of the issue or task. Always include the Mattermost thread link provided by the user."
+		},
+		"checklist": {
+			"type":  "array",
+			"items": {"type": "string"},
+			"description": "3 to 7 short, actionable checklist items."
+		}
+	},
+	"required": ["title", "description", "checklist"]
+}`)
 
 // Client is a minimal Anthropic messages API client.
 type Client struct {
@@ -45,16 +62,29 @@ type anthropicMessage struct {
 	Content string `json:"content"`
 }
 
+type anthropicTool struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"input_schema"`
+}
+
+type anthropicToolChoice struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
+}
+
 type anthropicRequest struct {
-	Model     string             `json:"model"`
-	MaxTokens int                `json:"max_tokens"`
-	System    string             `json:"system"`
-	Messages  []anthropicMessage `json:"messages"`
+	Model      string              `json:"model"`
+	MaxTokens  int                 `json:"max_tokens"`
+	System     string              `json:"system"`
+	Tools      []anthropicTool     `json:"tools"`
+	ToolChoice anthropicToolChoice `json:"tool_choice"`
+	Messages   []anthropicMessage  `json:"messages"`
 }
 
 type anthropicContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type  string          `json:"type"`
+	Input json.RawMessage `json:"input,omitempty"` // populated for tool_use blocks
 }
 
 type anthropicResponse struct {
@@ -64,13 +94,15 @@ type anthropicResponse struct {
 	} `json:"error,omitempty"`
 }
 
-// GenerateCardContent calls the Anthropic API and returns structured Trello card content
-// derived from the user's message.
+// GenerateCardContent calls the Anthropic API using forced tool use and returns structured
+// Trello card content derived from the user's message.
+//
+// Forced tool use (tool_choice: {type: "tool"}) guarantees that the response is always valid
+// JSON matching the card schema — no markdown fences, no prose, no parsing heuristics needed.
 //
 // model and maxTokens fall back to DefaultModel / DefaultMaxTokens when zero-valued.
 // additionalContext, if non-empty, is appended to the core system prompt so that
-// admin-supplied company/bot context reaches Claude without touching the JSON-output
-// instructions that must remain intact.
+// admin-supplied company/bot context reaches Claude without affecting output structure.
 func (c *Client) GenerateCardContent(userMessage, threadLink, model string, maxTokens int, additionalContext string) (*CardContent, error) {
 	if model == "" {
 		model = DefaultModel
@@ -93,6 +125,14 @@ func (c *Client) GenerateCardContent(userMessage, threadLink, model string, maxT
 		Model:     model,
 		MaxTokens: maxTokens,
 		System:    systemPmt,
+		Tools: []anthropicTool{
+			{
+				Name:        toolName,
+				Description: "Create a structured Trello card from the user's Mattermost message.",
+				InputSchema: cardInputSchema,
+			},
+		},
+		ToolChoice: anthropicToolChoice{Type: "tool", Name: toolName},
 		Messages: []anthropicMessage{
 			{Role: "user", Content: userPrompt},
 		},
@@ -131,33 +171,16 @@ func (c *Client) GenerateCardContent(userMessage, threadLink, model string, maxT
 		return nil, fmt.Errorf("anthropic: API error: %s", apiResp.Error.Message)
 	}
 
-	if len(apiResp.Content) == 0 {
-		return nil, fmt.Errorf("anthropic: empty response content")
+	// Find the tool_use block; with forced tool_choice this will always be present.
+	for _, block := range apiResp.Content {
+		if block.Type == "tool_use" {
+			var card CardContent
+			if err = json.Unmarshal(block.Input, &card); err != nil {
+				return nil, fmt.Errorf("anthropic: failed to parse card from tool input: %w", err)
+			}
+			return &card, nil
+		}
 	}
 
-	rawText := stripMarkdownFences(apiResp.Content[0].Text)
-	var card CardContent
-	if err = json.Unmarshal([]byte(rawText), &card); err != nil {
-		return nil, fmt.Errorf("anthropic: failed to parse card JSON from response: %w", err)
-	}
-
-	return &card, nil
-}
-
-// stripMarkdownFences removes ``` or ```json code fences that Claude sometimes adds
-// around the JSON response despite instructions to return bare JSON.
-func stripMarkdownFences(s string) string {
-	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "```") {
-		return s
-	}
-	// Drop the opening fence line (e.g. "```json" or "```").
-	if idx := strings.Index(s, "\n"); idx != -1 {
-		s = s[idx+1:]
-	}
-	// Drop the closing fence.
-	if idx := strings.LastIndex(s, "```"); idx != -1 {
-		s = s[:idx]
-	}
-	return strings.TrimSpace(s)
+	return nil, fmt.Errorf("anthropic: no tool_use block in response")
 }
