@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/mattermost/mattermost/server/public/pluginapi/cluster"
 	"github.com/pkg/errors"
 
+	"github.com/mattermost/mattermost-plugin-starter-template/server/anthropic"
 	"github.com/mattermost/mattermost-plugin-starter-template/server/command"
 	"github.com/mattermost/mattermost-plugin-starter-template/server/handler"
 	"github.com/mattermost/mattermost-plugin-starter-template/server/store/kvstore"
@@ -126,6 +128,13 @@ func (p *Plugin) MessageHasBeenPosted(_ *plugin.Context, post *model.Post) {
 		return
 	}
 
+	maxTokens := anthropic.DefaultMaxTokens
+	if cfg.AnthropicMaxTokens != "" {
+		if n, err := strconv.Atoi(cfg.AnthropicMaxTokens); err == nil && n > 0 {
+			maxTokens = n
+		}
+	}
+
 	lowerMessage := strings.ToLower(post.Message)
 	for _, bc := range botConfigs {
 		if !strings.Contains(lowerMessage, "@"+strings.ToLower(bc.BotUsername)) {
@@ -147,12 +156,17 @@ func (p *Plugin) MessageHasBeenPosted(_ *plugin.Context, post *model.Post) {
 		}
 
 		handlerCfg := handler.BotConfig{
-			BotUsername:    bc.BotUsername,
-			BotDisplayName: bc.BotDisplayName,
-			TrelloAPIKey:   bc.TrelloAPIKey,
-			TrelloAPIToken: bc.TrelloAPIToken,
-			TrelloBoardID:  bc.TrelloBoardID,
-			TrelloListID:   bc.TrelloListID,
+			BotUsername:        bc.BotUsername,
+			BotDisplayName:     bc.BotDisplayName,
+			TrelloAPIKey:       bc.TrelloAPIKey,
+			TrelloAPIToken:     bc.TrelloAPIToken,
+			TrelloBoardID:      bc.TrelloBoardID,
+			TrelloListID:       bc.TrelloListID,
+			BotContext:         bc.BotContext,
+			AnthropicAPIKey:    cfg.AnthropicAPIKey,
+			AnthropicModel:     cfg.AnthropicModel,
+			AnthropicMaxTokens: maxTokens,
+			GlobalContext:      cfg.GlobalContext,
 		}
 
 		// Capture loop variables for the goroutine.

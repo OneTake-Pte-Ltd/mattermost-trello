@@ -15,13 +15,27 @@ type BotConfig struct {
 	TrelloAPIToken string `json:"trelloApiToken"`
 	TrelloBoardID  string `json:"trelloBoardId"`
 	TrelloListID   string `json:"trelloListId"`
+	// BotContext is optional free-text that describes this bot's role, personality, or style.
+	// It is appended to the global context (if any) and injected into every Anthropic call
+	// made by this bot, after the immutable JSON-output instructions.
+	BotContext string `json:"botContext"`
 }
 
 // configuration captures the plugin's external configuration as exposed in the Mattermost server
 // configuration. Any public fields will be deserialized from the Mattermost server configuration
 // in OnConfigurationChange.
 type configuration struct {
-	AnthropicAPIKey   string
+	AnthropicAPIKey string
+	// AnthropicModel is the Claude model ID to use (e.g. "claude-sonnet-4-6").
+	// Defaults to anthropic.DefaultModel when blank.
+	AnthropicModel string
+	// AnthropicMaxTokens is stored as a string because Mattermost plugin settings only support
+	// text inputs for numeric values. It is parsed to int in plugin.go.
+	// Defaults to anthropic.DefaultMaxTokens when blank or unparseable.
+	AnthropicMaxTokens string
+	// GlobalContext is optional free-text injected into every Anthropic call across all bots,
+	// before any per-bot context.  Use it to provide company-wide background information.
+	GlobalContext     string
 	BotConfigurations string
 }
 
