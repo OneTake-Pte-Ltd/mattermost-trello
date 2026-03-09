@@ -53,9 +53,29 @@ func (h *Handler) Handle(post *model.Post, botUsername, botUserID string, cfg Bo
 		h.API.LogError("Failed to get thread card from KV store", "error", err.Error(), "rootPostID", rootPostID)
 	}
 
+	cmd, rest := parseCommand(messageText)
+
+	// Use 'rest' for progress keyword detection so that "/update" doesn't trigger progress.
+	progressText := messageText
+	if cmd != "" {
+		progressText = rest
+	}
+
 	switch {
-	case isProgressQuery(messageText) && threadCard != nil:
+	case cmd != "" && threadCard == nil:
+		// Slash commands require a linked Trello card.
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"No Trello card is linked to this thread yet. Mention me at the start of the thread to create one first.")
+	case cmd == "update":
+		h.handleUpdateCard(post, botUserID, rootPostID, rest, threadCard, cfg)
+	case cmd == "done":
+		h.handleMarkDone(post, botUserID, rootPostID, rest, threadCard, cfg)
+	case cmd == "progress" || (isProgressQuery(progressText) && threadCard != nil):
 		h.handleProgressQuery(post, botUserID, rootPostID, threadCard, cfg)
+	case cmd == "freestyle":
+		h.handleFreestyle(post, botUserID, rootPostID, threadCard, cfg)
+	case cmd == "linear":
+		h.handleLinear(post, botUserID, rootPostID, rest, threadCard, cfg)
 	case threadCard != nil:
 		h.handleAddDetails(post, botUserID, rootPostID, messageText, threadCard, cfg)
 	default:
@@ -77,16 +97,7 @@ func (h *Handler) handleCreateCard(post *model.Post, botUserID, rootPostID, mess
 		return
 	}
 
-	// Combine global and per-bot context; each part is only included if non-empty.
-	var contextParts []string
-	if cfg.GlobalContext != "" {
-		contextParts = append(contextParts, cfg.GlobalContext)
-	}
-	if cfg.BotContext != "" {
-		contextParts = append(contextParts, cfg.BotContext)
-	}
-	additionalContext := strings.Join(contextParts, "\n\n")
-
+	additionalContext := h.buildAdditionalContext(cfg)
 	threadLink := h.buildThreadLink(post, rootPostID)
 
 	ac := &anthropic.Client{APIKey: cfg.AnthropicAPIKey}
@@ -123,7 +134,7 @@ func (h *Handler) handleCreateCard(post *model.Post, botUserID, rootPostID, mess
 	}
 
 	h.postAsBot(botUserID, post.ChannelId, rootPostID,
-		fmt.Sprintf("I've created a Trello card: [%s](%s)\n\nReply in this thread to add more details or ask for `progress`.", content.Title, card.ShortURL))
+		fmt.Sprintf("I've created a Trello card: [%s](%s)\n\nReply in this thread to add more details or ask for `/progress`.", content.Title, card.ShortURL))
 }
 
 // handleAddDetails adds the user's follow-up message as a comment on the linked Trello card.
@@ -150,11 +161,16 @@ func (h *Handler) handleAddDetails(post *model.Post, botUserID, rootPostID, mess
 		fmt.Sprintf("Got it — I've added that to the [Trello card](%s).", threadCard.CardURL))
 }
 
-// handleProgressQuery fetches the Trello card's checklist and posts a summary.
+// handleProgressQuery fetches the Trello card's checklist and posts a Claude-narrated progress summary.
 func (h *Handler) handleProgressQuery(post *model.Post, botUserID, rootPostID string, threadCard *kvstore.ThreadCard, cfg BotConfig) {
 	if cfg.TrelloAPIKey == "" || cfg.TrelloAPIToken == "" {
 		h.postAsBot(botUserID, post.ChannelId, rootPostID,
 			"Trello credentials are not configured for this bot. Please ask an admin to set them up.")
+		return
+	}
+	if cfg.AnthropicAPIKey == "" {
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"I'm not set up yet — please ask an admin to configure the Anthropic API key.")
 		return
 	}
 
@@ -167,10 +183,273 @@ func (h *Handler) handleProgressQuery(post *model.Post, botUserID, rootPostID st
 		return
 	}
 
-	h.postAsBot(botUserID, post.ChannelId, rootPostID, formatProgress(detail))
+	cardContext := formatCardContext(detail)
+	systemPrompt := "You are a project management assistant. Given a Trello card's details and checklist status, generate a concise, informative progress update in conversational language. Summarize what has been completed and what remains."
+
+	ac := &anthropic.Client{APIKey: cfg.AnthropicAPIKey}
+	narrative, err := ac.GenerateText(systemPrompt, cardContext, cfg.AnthropicModel, cfg.AnthropicMaxTokens)
+	if err != nil {
+		h.API.LogError("Anthropic GenerateText error (progress)", "error", err.Error())
+		// Fallback to static format if Claude is unavailable.
+		h.postAsBot(botUserID, post.ChannelId, rootPostID, formatProgress(detail))
+		return
+	}
+
+	h.postAsBot(botUserID, post.ChannelId, rootPostID, narrative)
 }
 
-// formatProgress formats the Trello card detail into a readable progress summary.
+// handleUpdateCard fetches the existing card + thread, asks Claude to rewrite it, and updates Trello.
+func (h *Handler) handleUpdateCard(post *model.Post, botUserID, rootPostID, userMessage string, threadCard *kvstore.ThreadCard, cfg BotConfig) {
+	if cfg.TrelloAPIKey == "" || cfg.TrelloAPIToken == "" {
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"Trello credentials are not configured for this bot. Please ask an admin to set them up.")
+		return
+	}
+	if cfg.AnthropicAPIKey == "" {
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"I'm not set up yet — please ask an admin to configure the Anthropic API key.")
+		return
+	}
+
+	tc := &trello.Client{APIKey: cfg.TrelloAPIKey, APIToken: cfg.TrelloAPIToken}
+	detail, err := tc.GetCardWithChecklists(threadCard.CardID)
+	if err != nil {
+		h.API.LogError("Trello GetCardWithChecklists error", "error", err.Error(), "cardID", threadCard.CardID)
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"Something went wrong — I couldn't fetch the Trello card. Please try again or contact an admin.")
+		return
+	}
+
+	cardContext := formatCardContext(detail)
+	threadContent := h.getThreadContent(rootPostID)
+	additionalContext := h.buildAdditionalContext(cfg)
+
+	ac := &anthropic.Client{APIKey: cfg.AnthropicAPIKey}
+	newContent, err := ac.GenerateCardUpdate(cardContext, threadContent, userMessage, cfg.AnthropicModel, cfg.AnthropicMaxTokens, additionalContext)
+	if err != nil {
+		h.API.LogError("Anthropic GenerateCardUpdate error", "error", err.Error())
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"Something went wrong while generating the card update. Please try again or contact an admin.")
+		return
+	}
+
+	if err = tc.UpdateCard(threadCard.CardID, newContent.Title, newContent.Description); err != nil {
+		h.API.LogError("Trello UpdateCard error", "error", err.Error(), "cardID", threadCard.CardID)
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"Something went wrong — I couldn't update the Trello card. Please try again or contact an admin.")
+		return
+	}
+
+	// Replace existing checklists with the new ones from Claude.
+	for _, cl := range detail.Checklists {
+		if delErr := tc.DeleteChecklist(cl.ID); delErr != nil {
+			h.API.LogError("Trello DeleteChecklist error", "error", delErr.Error(), "checklistID", cl.ID)
+			// Non-fatal: continue and try to add the new checklist.
+		}
+	}
+	if len(newContent.Checklist) > 0 {
+		if err = tc.AddChecklist(threadCard.CardID, "Tasks", newContent.Checklist); err != nil {
+			h.API.LogError("Trello AddChecklist error after update", "error", err.Error(), "cardID", threadCard.CardID)
+		}
+	}
+
+	// Update the stored card URL in case the title changed.
+	if err = h.KVStore.SetThreadCard(rootPostID, &kvstore.ThreadCard{
+		CardID:      threadCard.CardID,
+		CardURL:     threadCard.CardURL,
+		BotUsername: cfg.BotUsername,
+	}); err != nil {
+		h.API.LogError("Failed to update thread card mapping", "error", err.Error())
+	}
+
+	h.postAsBot(botUserID, post.ChannelId, rootPostID,
+		fmt.Sprintf("I've updated the [Trello card](%s) — title, description, and checklist revised.", threadCard.CardURL))
+}
+
+// handleMarkDone uses Claude to identify which checklist items match the user's message, then marks them complete.
+func (h *Handler) handleMarkDone(post *model.Post, botUserID, rootPostID, userMessage string, threadCard *kvstore.ThreadCard, cfg BotConfig) {
+	if cfg.TrelloAPIKey == "" || cfg.TrelloAPIToken == "" {
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"Trello credentials are not configured for this bot. Please ask an admin to set them up.")
+		return
+	}
+	if cfg.AnthropicAPIKey == "" {
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"I'm not set up yet — please ask an admin to configure the Anthropic API key.")
+		return
+	}
+
+	tc := &trello.Client{APIKey: cfg.TrelloAPIKey, APIToken: cfg.TrelloAPIToken}
+	detail, err := tc.GetCardWithChecklists(threadCard.CardID)
+	if err != nil {
+		h.API.LogError("Trello GetCardWithChecklists error", "error", err.Error(), "cardID", threadCard.CardID)
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"Something went wrong — I couldn't fetch the Trello card. Please try again or contact an admin.")
+		return
+	}
+
+	cardContext := formatCardContext(detail)
+	additionalContext := h.buildAdditionalContext(cfg)
+
+	ac := &anthropic.Client{APIKey: cfg.AnthropicAPIKey}
+	itemNames, err := ac.IdentifyDoneItems(cardContext, userMessage, cfg.AnthropicModel, cfg.AnthropicMaxTokens, additionalContext)
+	if err != nil {
+		h.API.LogError("Anthropic IdentifyDoneItems error", "error", err.Error())
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"Something went wrong while identifying which items to mark done. Please try again or contact an admin.")
+		return
+	}
+
+	if len(itemNames) == 0 {
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"I couldn't identify any checklist items matching your message. Please be more specific.")
+		return
+	}
+
+	// Build a name→CheckItem index for fast lookup.
+	type itemKey struct{ checklistID, checkItemID string }
+	itemIndex := map[string]itemKey{}
+	for _, cl := range detail.Checklists {
+		for _, item := range cl.CheckItems {
+			itemIndex[strings.ToLower(item.Name)] = itemKey{cl.ID, item.ID}
+		}
+	}
+
+	var marked []string
+	for _, name := range itemNames {
+		key, ok := itemIndex[strings.ToLower(name)]
+		if !ok {
+			h.API.LogWarn("CheckItem name returned by Claude not found in card", "name", name, "cardID", threadCard.CardID)
+			continue
+		}
+		if updateErr := tc.UpdateCheckItemState(threadCard.CardID, key.checkItemID, "complete"); updateErr != nil {
+			h.API.LogError("Trello UpdateCheckItemState error", "error", updateErr.Error(), "item", name)
+			continue
+		}
+		marked = append(marked, name)
+	}
+
+	if len(marked) == 0 {
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"I wasn't able to mark any items as done. Please check the checklist and try again.")
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Marked %d item(s) as done on the [Trello card](%s):\n", len(marked), threadCard.CardURL))
+	for _, name := range marked {
+		sb.WriteString(fmt.Sprintf("✅ %s\n", name))
+	}
+	h.postAsBot(botUserID, post.ChannelId, rootPostID, strings.TrimRight(sb.String(), "\n"))
+}
+
+// handleFreestyle generates rap lyrics about the Trello card and posts them.
+func (h *Handler) handleFreestyle(post *model.Post, botUserID, rootPostID string, threadCard *kvstore.ThreadCard, cfg BotConfig) {
+	if cfg.TrelloAPIKey == "" || cfg.TrelloAPIToken == "" {
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"Trello credentials are not configured for this bot. Please ask an admin to set them up.")
+		return
+	}
+	if cfg.AnthropicAPIKey == "" {
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"I'm not set up yet — please ask an admin to configure the Anthropic API key.")
+		return
+	}
+
+	tc := &trello.Client{APIKey: cfg.TrelloAPIKey, APIToken: cfg.TrelloAPIToken}
+	detail, err := tc.GetCardWithChecklists(threadCard.CardID)
+	if err != nil {
+		h.API.LogError("Trello GetCardWithChecklists error", "error", err.Error(), "cardID", threadCard.CardID)
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"Something went wrong — I couldn't fetch the Trello card. Please try again or contact an admin.")
+		return
+	}
+
+	cardContext := formatCardContext(detail)
+	systemPrompt := "You are a creative rap artist. Write fun, energetic rap lyrics about the following Trello project card. Be creative and reference the actual tasks, but keep it workplace-appropriate."
+
+	ac := &anthropic.Client{APIKey: cfg.AnthropicAPIKey}
+	lyrics, err := ac.GenerateText(systemPrompt, cardContext, cfg.AnthropicModel, 1024)
+	if err != nil {
+		h.API.LogError("Anthropic GenerateText error (freestyle)", "error", err.Error())
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"Something went wrong while composing the rap. Please try again or contact an admin.")
+		return
+	}
+
+	h.postAsBot(botUserID, post.ChannelId, rootPostID, lyrics)
+}
+
+// handleLinear generates a Linear issue body from the Trello card and Mattermost thread.
+func (h *Handler) handleLinear(post *model.Post, botUserID, rootPostID, userMessage string, threadCard *kvstore.ThreadCard, cfg BotConfig) {
+	if cfg.TrelloAPIKey == "" || cfg.TrelloAPIToken == "" {
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"Trello credentials are not configured for this bot. Please ask an admin to set them up.")
+		return
+	}
+	if cfg.AnthropicAPIKey == "" {
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"I'm not set up yet — please ask an admin to configure the Anthropic API key.")
+		return
+	}
+
+	tc := &trello.Client{APIKey: cfg.TrelloAPIKey, APIToken: cfg.TrelloAPIToken}
+	detail, err := tc.GetCardWithChecklists(threadCard.CardID)
+	if err != nil {
+		h.API.LogError("Trello GetCardWithChecklists error", "error", err.Error(), "cardID", threadCard.CardID)
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"Something went wrong — I couldn't fetch the Trello card. Please try again or contact an admin.")
+		return
+	}
+
+	cardContext := formatCardContext(detail)
+	threadContent := h.getThreadContent(rootPostID)
+
+	var promptParts []string
+	promptParts = append(promptParts, cardContext)
+	if threadContent != "" {
+		promptParts = append(promptParts, "---\n\nMattermost Thread:\n"+threadContent)
+	}
+	if userMessage != "" {
+		promptParts = append(promptParts, "Additional notes: "+userMessage)
+	}
+	userPrompt := strings.Join(promptParts, "\n\n")
+
+	ac := &anthropic.Client{APIKey: cfg.AnthropicAPIKey}
+	issueBody, err := ac.GenerateText(anthropic.LinearSkillPrompt(), userPrompt, cfg.AnthropicModel, 4096)
+	if err != nil {
+		h.API.LogError("Anthropic GenerateText error (linear)", "error", err.Error())
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"Something went wrong while generating the Linear issue. Please try again or contact an admin.")
+		return
+	}
+
+	h.postAsBot(botUserID, post.ChannelId, rootPostID, issueBody)
+}
+
+// formatCardContext formats a CardDetail into a readable string for Claude prompts.
+func formatCardContext(detail *trello.CardDetail) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("**Card:** %s\n", detail.Name))
+	if detail.Desc != "" {
+		sb.WriteString(fmt.Sprintf("**Description:** %s\n", detail.Desc))
+	}
+	if len(detail.Checklists) > 0 {
+		for _, cl := range detail.Checklists {
+			sb.WriteString(fmt.Sprintf("\n**Checklist: %s**\n", cl.Name))
+			for _, item := range cl.CheckItems {
+				if item.State == "complete" {
+					sb.WriteString(fmt.Sprintf("✅ %s\n", item.Name))
+				} else {
+					sb.WriteString(fmt.Sprintf("⬜ %s\n", item.Name))
+				}
+			}
+		}
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// formatProgress formats the Trello card detail into a readable progress summary (fallback).
 func formatProgress(detail *trello.CardDetail) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("**[%s](%s)**\n\n", detail.Name, detail.ShortURL))
@@ -200,6 +479,42 @@ func formatProgress(detail *trello.CardDetail) string {
 	}
 
 	return strings.TrimRight(sb.String(), "\n")
+}
+
+// getThreadContent fetches all posts in the thread and formats them as readable text.
+func (h *Handler) getThreadContent(rootPostID string) string {
+	postList, appErr := h.API.GetPostThread(rootPostID)
+	if appErr != nil {
+		h.API.LogWarn("Failed to fetch thread content", "error", appErr.Error(), "rootPostID", rootPostID)
+		return ""
+	}
+
+	var sb strings.Builder
+	for _, postID := range postList.Order {
+		p, ok := postList.Posts[postID]
+		if !ok || p.Message == "" {
+			continue
+		}
+		user, userErr := h.API.GetUser(p.UserId)
+		username := p.UserId
+		if userErr == nil {
+			username = user.Username
+		}
+		sb.WriteString(fmt.Sprintf("@%s: %s\n", username, p.Message))
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// buildAdditionalContext combines GlobalContext and BotContext.
+func (h *Handler) buildAdditionalContext(cfg BotConfig) string {
+	var parts []string
+	if cfg.GlobalContext != "" {
+		parts = append(parts, cfg.GlobalContext)
+	}
+	if cfg.BotContext != "" {
+		parts = append(parts, cfg.BotContext)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // postAsBot creates a post in a channel/thread on behalf of a bot user.
@@ -243,6 +558,22 @@ func (h *Handler) getPostAuthorUsername(userID string) string {
 		return userID
 	}
 	return user.Username
+}
+
+// parseCommand checks if the message starts with a known slash command.
+// Returns the command name (without slash) and the remaining text, or empty strings if no command found.
+func parseCommand(msg string) (cmd, rest string) {
+	known := []string{"update", "done", "progress", "freestyle", "linear"}
+	for _, c := range known {
+		prefix := "/" + c
+		if strings.EqualFold(msg, prefix) {
+			return c, ""
+		}
+		if strings.HasPrefix(strings.ToLower(msg), prefix+" ") {
+			return c, strings.TrimSpace(msg[len(prefix):])
+		}
+	}
+	return "", ""
 }
 
 // stripBotMention removes the @botUsername mention from the message text.
