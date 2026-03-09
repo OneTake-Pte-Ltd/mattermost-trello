@@ -2,11 +2,21 @@ package anthropic
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
+
+//go:embed skills/issue-writer/SKILL.md
+var linearSkillPrompt string
+
+// LinearSkillPrompt returns the embedded system prompt for Linear issue generation.
+func LinearSkillPrompt() string {
+	return linearSkillPrompt
+}
 
 const (
 	apiURL      = "https://api.anthropic.com/v1/messages"
@@ -74,16 +84,17 @@ type anthropicToolChoice struct {
 }
 
 type anthropicRequest struct {
-	Model      string              `json:"model"`
-	MaxTokens  int                 `json:"max_tokens"`
-	System     string              `json:"system"`
-	Tools      []anthropicTool     `json:"tools"`
-	ToolChoice anthropicToolChoice `json:"tool_choice"`
-	Messages   []anthropicMessage  `json:"messages"`
+	Model      string               `json:"model"`
+	MaxTokens  int                  `json:"max_tokens"`
+	System     string               `json:"system"`
+	Tools      []anthropicTool      `json:"tools,omitempty"`
+	ToolChoice *anthropicToolChoice `json:"tool_choice,omitempty"`
+	Messages   []anthropicMessage   `json:"messages"`
 }
 
 type anthropicContent struct {
 	Type  string          `json:"type"`
+	Text  string          `json:"text,omitempty"`  // populated for text blocks
 	Input json.RawMessage `json:"input,omitempty"` // populated for tool_use blocks
 }
 
@@ -132,10 +143,101 @@ func (c *Client) GenerateCardContent(userMessage, threadLink, model string, maxT
 				InputSchema: cardInputSchema,
 			},
 		},
-		ToolChoice: anthropicToolChoice{Type: "tool", Name: toolName},
+		ToolChoice: &anthropicToolChoice{Type: "tool", Name: toolName},
 		Messages: []anthropicMessage{
 			{Role: "user", Content: userPrompt},
 		},
+	}
+
+	return c.callForcedTool(reqBody)
+}
+
+// doneItemsInputSchema is the tool schema for identifying checklist items to mark done.
+var doneItemsInputSchema = json.RawMessage(`{
+	"type": "object",
+	"properties": {
+		"item_names": {
+			"type": "array",
+			"items": {"type": "string"},
+			"description": "The names of checklist items that should be marked as complete."
+		}
+	},
+	"required": ["item_names"]
+}`)
+
+// GenerateCardUpdate calls the Anthropic API to rewrite an existing Trello card's content
+// based on the current card state, the Mattermost thread, and any user instructions.
+func (c *Client) GenerateCardUpdate(cardContext, threadContent, userMessage, model string, maxTokens int, additionalContext string) (*CardContent, error) {
+	if model == "" {
+		model = DefaultModel
+	}
+	if maxTokens <= 0 {
+		maxTokens = DefaultMaxTokens
+	}
+
+	systemPmt := `You are a project management assistant that updates existing Trello cards. Rewrite the card's title, description, and checklist based on the current card content, the Mattermost thread context, and any explicit user instructions. Preserve information that is still relevant, update what needs changing, and reflect new information from the thread.`
+	if additionalContext != "" {
+		systemPmt += "\n\n" + additionalContext
+	}
+
+	var promptParts []string
+	promptParts = append(promptParts, "Current card:\n"+cardContext)
+	if threadContent != "" {
+		promptParts = append(promptParts, "Mattermost thread:\n"+threadContent)
+	}
+	if userMessage != "" {
+		promptParts = append(promptParts, "User instructions: "+userMessage)
+	}
+	userPrompt := strings.Join(promptParts, "\n\n")
+
+	reqBody := anthropicRequest{
+		Model:     model,
+		MaxTokens: maxTokens,
+		System:    systemPmt,
+		Tools: []anthropicTool{
+			{
+				Name:        toolName,
+				Description: "Update a Trello card with revised title, description, and checklist.",
+				InputSchema: cardInputSchema,
+			},
+		},
+		ToolChoice: &anthropicToolChoice{Type: "tool", Name: toolName},
+		Messages:   []anthropicMessage{{Role: "user", Content: userPrompt}},
+	}
+
+	return c.callForcedTool(reqBody)
+}
+
+// IdentifyDoneItems calls the Anthropic API to determine which checklist item names should
+// be marked as complete based on the user's message and the current card checklist.
+func (c *Client) IdentifyDoneItems(cardContext, userMessage, model string, maxTokens int, additionalContext string) ([]string, error) {
+	if model == "" {
+		model = DefaultModel
+	}
+	if maxTokens <= 0 {
+		maxTokens = 512
+	}
+
+	systemPmt := `You are a project management assistant. Given a Trello card's checklist and a user message describing which items are done, identify the exact item names from the checklist that should be marked as complete. Only include items that clearly match what the user described.`
+	if additionalContext != "" {
+		systemPmt += "\n\n" + additionalContext
+	}
+
+	userPrompt := fmt.Sprintf("Card checklist:\n%s\n\nUser says: %s", cardContext, userMessage)
+
+	reqBody := anthropicRequest{
+		Model:     model,
+		MaxTokens: maxTokens,
+		System:    systemPmt,
+		Tools: []anthropicTool{
+			{
+				Name:        "mark_items_done",
+				Description: "Return the names of checklist items that should be marked as complete.",
+				InputSchema: doneItemsInputSchema,
+			},
+		},
+		ToolChoice: &anthropicToolChoice{Type: "tool", Name: "mark_items_done"},
+		Messages:   []anthropicMessage{{Role: "user", Content: userPrompt}},
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
@@ -166,12 +268,120 @@ func (c *Client) GenerateCardContent(userMessage, threadLink, model string, maxT
 	if err = json.Unmarshal(respBytes, &apiResp); err != nil {
 		return nil, fmt.Errorf("anthropic: failed to parse response: %w", err)
 	}
-
 	if apiResp.Error != nil {
 		return nil, fmt.Errorf("anthropic: API error: %s", apiResp.Error.Message)
 	}
 
-	// Find the tool_use block; with forced tool_choice this will always be present.
+	for _, block := range apiResp.Content {
+		if block.Type == "tool_use" {
+			var result struct {
+				ItemNames []string `json:"item_names"`
+			}
+			if err = json.Unmarshal(block.Input, &result); err != nil {
+				return nil, fmt.Errorf("anthropic: failed to parse done items: %w", err)
+			}
+			return result.ItemNames, nil
+		}
+	}
+	return nil, fmt.Errorf("anthropic: no tool_use block in response")
+}
+
+// GenerateText calls the Anthropic API for a plain text response (no tool forcing).
+// Used for progress narratives, freestyle rap, and Linear issue generation.
+func (c *Client) GenerateText(systemPrompt, userPrompt, model string, maxTokens int) (string, error) {
+	if model == "" {
+		model = DefaultModel
+	}
+	if maxTokens <= 0 {
+		maxTokens = DefaultMaxTokens
+	}
+
+	reqBody := anthropicRequest{
+		Model:     model,
+		MaxTokens: maxTokens,
+		System:    systemPrompt,
+		Messages:  []anthropicMessage{{Role: "user", Content: userPrompt}},
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("anthropic: failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("anthropic: failed to create request: %w", err)
+	}
+	req.Header.Set("x-api-key", c.APIKey)
+	req.Header.Set("anthropic-version", apiVersion)
+	req.Header.Set("content-type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("anthropic: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("anthropic: failed to read response: %w", err)
+	}
+
+	var apiResp anthropicResponse
+	if err = json.Unmarshal(respBytes, &apiResp); err != nil {
+		return "", fmt.Errorf("anthropic: failed to parse response: %w", err)
+	}
+	if apiResp.Error != nil {
+		return "", fmt.Errorf("anthropic: API error: %s", apiResp.Error.Message)
+	}
+
+	var sb strings.Builder
+	for _, block := range apiResp.Content {
+		if block.Type == "text" && block.Text != "" {
+			sb.WriteString(block.Text)
+		}
+	}
+	result := sb.String()
+	if result == "" {
+		return "", fmt.Errorf("anthropic: no text content in response")
+	}
+	return result, nil
+}
+
+// callForcedTool is shared by GenerateCardContent and GenerateCardUpdate to avoid duplication.
+func (c *Client) callForcedTool(reqBody anthropicRequest) (*CardContent, error) {
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: failed to create request: %w", err)
+	}
+	req.Header.Set("x-api-key", c.APIKey)
+	req.Header.Set("anthropic-version", apiVersion)
+	req.Header.Set("content-type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: failed to read response: %w", err)
+	}
+
+	var apiResp anthropicResponse
+	if err = json.Unmarshal(respBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("anthropic: failed to parse response: %w", err)
+	}
+	if apiResp.Error != nil {
+		return nil, fmt.Errorf("anthropic: API error: %s", apiResp.Error.Message)
+	}
+
 	for _, block := range apiResp.Content {
 		if block.Type == "tool_use" {
 			var card CardContent
@@ -181,6 +391,5 @@ func (c *Client) GenerateCardContent(userMessage, threadLink, model string, maxT
 			return &card, nil
 		}
 	}
-
 	return nil, fmt.Errorf("anthropic: no tool_use block in response")
 }

@@ -25,6 +25,7 @@ type Card struct {
 
 // CheckItem represents a single item within a Trello checklist.
 type CheckItem struct {
+	ID    string `json:"id"`
 	Name  string `json:"name"`
 	State string `json:"state"` // "complete" or "incomplete"
 }
@@ -41,6 +42,7 @@ type CardDetail struct {
 	ID         string      `json:"id"`
 	Name       string      `json:"name"`
 	ShortURL   string      `json:"shortUrl"`
+	Desc       string      `json:"desc"`
 	Checklists []Checklist `json:"checklists"`
 }
 
@@ -197,4 +199,89 @@ func (c *Client) GetCardWithChecklists(cardID string) (*CardDetail, error) {
 		return nil, fmt.Errorf("trello: failed to decode card detail response: %w", err)
 	}
 	return &detail, nil
+}
+
+// UpdateCard updates the name and description of an existing Trello card.
+func (c *Client) UpdateCard(cardID, name, desc string) error {
+	params := url.Values{}
+	params.Set("key", c.APIKey)
+	params.Set("token", c.APIToken)
+	params.Set("name", name)
+	params.Set("desc", desc)
+
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/cards/%s?%s", baseURL, cardID, params.Encode()), nil)
+	if err != nil {
+		return fmt.Errorf("trello: failed to build update card request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("trello: failed to update card: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("trello: update card returned status %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// UpdateCheckItemState sets the state ("complete" or "incomplete") of a checklist item on a card.
+// checklistID is required by the Trello API (idChecklist parameter).
+func (c *Client) UpdateCheckItemState(cardID, checklistID, checkItemID, state string) error {
+	params := url.Values{}
+	params.Set("key", c.APIKey)
+	params.Set("token", c.APIToken)
+	params.Set("idChecklist", checklistID)
+	params.Set("state", state)
+
+	req, err := http.NewRequest(
+		http.MethodPut,
+		fmt.Sprintf("%s/cards/%s/checkItem/%s?%s", baseURL, cardID, checkItemID, params.Encode()),
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("trello: failed to build update check item request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("trello: failed to update check item: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("trello: update check item returned status %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// DeleteChecklist removes a checklist from a Trello card.
+func (c *Client) DeleteChecklist(checklistID string) error {
+	params := url.Values{}
+	params.Set("key", c.APIKey)
+	params.Set("token", c.APIToken)
+
+	req, err := http.NewRequest(
+		http.MethodDelete,
+		fmt.Sprintf("%s/checklists/%s?%s", baseURL, checklistID, params.Encode()),
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("trello: failed to build delete checklist request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("trello: failed to delete checklist: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("trello: delete checklist returned status %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
 }
