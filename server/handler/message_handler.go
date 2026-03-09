@@ -36,8 +36,6 @@ type Handler struct {
 	KVStore kvstore.KVStore
 }
 
-var progressKeywords = []string{"progress", "status", "update"}
-
 // Handle is the main entry point. It is called from a goroutine for each post that mentions
 // a configured bot.
 func (h *Handler) Handle(post *model.Post, botUsername, botUserID string, cfg BotConfig) {
@@ -55,12 +53,6 @@ func (h *Handler) Handle(post *model.Post, botUsername, botUserID string, cfg Bo
 
 	cmd, rest := parseCommand(messageText)
 
-	// Use 'rest' for progress keyword detection so that "/update" doesn't trigger progress.
-	progressText := messageText
-	if cmd != "" {
-		progressText = rest
-	}
-
 	switch {
 	case cmd != "" && threadCard == nil:
 		// Slash commands require a linked Trello card.
@@ -70,7 +62,7 @@ func (h *Handler) Handle(post *model.Post, botUsername, botUserID string, cfg Bo
 		h.handleUpdateCard(post, botUserID, rootPostID, rest, threadCard, cfg)
 	case cmd == "done":
 		h.handleMarkDone(post, botUserID, rootPostID, rest, threadCard, cfg)
-	case cmd == "progress" || (isProgressQuery(progressText) && threadCard != nil):
+	case cmd == "progress":
 		h.handleProgressQuery(post, botUserID, rootPostID, threadCard, cfg)
 	case cmd == "freestyle":
 		h.handleFreestyle(post, botUserID, rootPostID, threadCard, cfg)
@@ -161,16 +153,11 @@ func (h *Handler) handleAddDetails(post *model.Post, botUserID, rootPostID, mess
 		fmt.Sprintf("Got it — I've added that to the [Trello card](%s).", threadCard.CardURL))
 }
 
-// handleProgressQuery fetches the Trello card's checklist and posts a Claude-narrated progress summary.
+// handleProgressQuery fetches the Trello card's checklist and posts a formatted progress summary.
 func (h *Handler) handleProgressQuery(post *model.Post, botUserID, rootPostID string, threadCard *kvstore.ThreadCard, cfg BotConfig) {
 	if cfg.TrelloAPIKey == "" || cfg.TrelloAPIToken == "" {
 		h.postAsBot(botUserID, post.ChannelId, rootPostID,
 			"Trello credentials are not configured for this bot. Please ask an admin to set them up.")
-		return
-	}
-	if cfg.AnthropicAPIKey == "" {
-		h.postAsBot(botUserID, post.ChannelId, rootPostID,
-			"I'm not set up yet — please ask an admin to configure the Anthropic API key.")
 		return
 	}
 
@@ -183,19 +170,7 @@ func (h *Handler) handleProgressQuery(post *model.Post, botUserID, rootPostID st
 		return
 	}
 
-	cardContext := formatCardContext(detail)
-	systemPrompt := "You are a project management assistant. Given a Trello card's details and checklist status, generate a concise, informative progress update in conversational language. Summarize what has been completed and what remains."
-
-	ac := &anthropic.Client{APIKey: cfg.AnthropicAPIKey}
-	narrative, err := ac.GenerateText(systemPrompt, cardContext, cfg.AnthropicModel, cfg.AnthropicMaxTokens)
-	if err != nil {
-		h.API.LogError("Anthropic GenerateText error (progress)", "error", err.Error())
-		// Fallback to static format if Claude is unavailable.
-		h.postAsBot(botUserID, post.ChannelId, rootPostID, formatProgress(detail))
-		return
-	}
-
-	h.postAsBot(botUserID, post.ChannelId, rootPostID, narrative)
+	h.postAsBot(botUserID, post.ChannelId, rootPostID, formatProgress(detail))
 }
 
 // handleUpdateCard fetches the existing card + thread, asks Claude to rewrite it, and updates Trello.
@@ -580,15 +555,4 @@ func parseCommand(msg string) (cmd, rest string) {
 func stripBotMention(message, botUsername string) string {
 	re := regexp.MustCompile(`(?i)@` + regexp.QuoteMeta(botUsername) + `\s*`)
 	return strings.TrimSpace(re.ReplaceAllString(message, ""))
-}
-
-// isProgressQuery returns true if the message is asking for a progress or status update.
-func isProgressQuery(message string) bool {
-	lower := strings.ToLower(message)
-	for _, kw := range progressKeywords {
-		if strings.Contains(lower, kw) {
-			return true
-		}
-	}
-	return false
 }
