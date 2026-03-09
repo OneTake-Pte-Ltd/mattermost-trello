@@ -322,7 +322,7 @@ func (h *Handler) handleMarkDone(post *model.Post, botUserID, rootPostID, userMe
 			h.API.LogWarn("CheckItem name returned by Claude not found in card", "name", name, "cardID", threadCard.CardID)
 			continue
 		}
-		if updateErr := tc.UpdateCheckItemState(threadCard.CardID, key.checkItemID, "complete"); updateErr != nil {
+		if updateErr := tc.UpdateCheckItemState(threadCard.CardID, key.checklistID, key.checkItemID, "complete"); updateErr != nil {
 			h.API.LogError("Trello UpdateCheckItemState error", "error", updateErr.Error(), "item", name)
 			continue
 		}

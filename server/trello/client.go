@@ -228,10 +228,12 @@ func (c *Client) UpdateCard(cardID, name, desc string) error {
 }
 
 // UpdateCheckItemState sets the state ("complete" or "incomplete") of a checklist item on a card.
-func (c *Client) UpdateCheckItemState(cardID, checkItemID, state string) error {
+// checklistID is required by the Trello API (idChecklist parameter).
+func (c *Client) UpdateCheckItemState(cardID, checklistID, checkItemID, state string) error {
 	params := url.Values{}
 	params.Set("key", c.APIKey)
 	params.Set("token", c.APIToken)
+	params.Set("idChecklist", checklistID)
 	params.Set("state", state)
 
 	req, err := http.NewRequest(
