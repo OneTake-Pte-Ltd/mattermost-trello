@@ -44,6 +44,12 @@ func (h *Handler) Handle(post *model.Post, botUsername, botUserID string, cfg Bo
 		rootPostID = post.Id
 	}
 
+	h.addReaction(botUserID, post.Id, "eyes")
+	defer func() {
+		h.removeReaction(botUserID, post.Id, "eyes")
+		h.addReaction(botUserID, post.Id, "white_check_mark")
+	}()
+
 	messageText := stripBotMention(post.Message, botUsername)
 
 	threadCard, err := h.KVStore.GetThreadCard(rootPostID)
@@ -490,6 +496,28 @@ func (h *Handler) buildAdditionalContext(cfg BotConfig) string {
 		parts = append(parts, cfg.BotContext)
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// addReaction adds an emoji reaction to a post on behalf of the bot.
+func (h *Handler) addReaction(botUserID, postID, emojiName string) {
+	if _, err := h.API.AddReaction(&model.Reaction{
+		UserId:    botUserID,
+		PostId:    postID,
+		EmojiName: emojiName,
+	}); err != nil {
+		h.API.LogWarn("Failed to add reaction", "emoji", emojiName, "postID", postID, "error", err.Error())
+	}
+}
+
+// removeReaction removes an emoji reaction from a post on behalf of the bot.
+func (h *Handler) removeReaction(botUserID, postID, emojiName string) {
+	if err := h.API.RemoveReaction(&model.Reaction{
+		UserId:    botUserID,
+		PostId:    postID,
+		EmojiName: emojiName,
+	}); err != nil {
+		h.API.LogWarn("Failed to remove reaction", "emoji", emojiName, "postID", postID, "error", err.Error())
+	}
 }
 
 // postAsBot creates a post in a channel/thread on behalf of a bot user.
