@@ -175,7 +175,7 @@ func (c *Client) GenerateCardUpdate(cardContext, threadContent, userMessage, mod
 		maxTokens = DefaultMaxTokens
 	}
 
-	systemPmt := `You are a project management assistant that updates existing Trello cards. Rewrite the card's title, description, and checklist based on the current card content, the Mattermost thread context, and any explicit user instructions. Preserve information that is still relevant, update what needs changing, and reflect new information from the thread.`
+	systemPmt := `You are a project management assistant that updates existing Trello cards. Rewrite the card's title, description, and checklist based on the current card content, the Mattermost thread context, and any explicit user instructions. Preserve information that is still relevant, update what needs changing, and reflect new information from the thread. The checklist items you return must be plain text names only — do not include status markers, emoji (✅, ⬜), brackets, or any prefix in the item names.`
 	if additionalContext != "" {
 		systemPmt += "\n\n" + additionalContext
 	}
