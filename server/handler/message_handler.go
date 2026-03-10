@@ -229,6 +229,9 @@ func (h *Handler) handleUpdateCard(post *model.Post, botUserID, rootPostID, user
 		}
 	}
 	if len(newContent.Checklist) > 0 {
+		for i, item := range newContent.Checklist {
+			newContent.Checklist[i] = stripStatusPrefix(item)
+		}
 		if err = tc.AddChecklist(threadCard.CardID, "Tasks", newContent.Checklist); err != nil {
 			h.API.LogError("Trello AddChecklist error after update", "error", err.Error(), "cardID", threadCard.CardID)
 		}
@@ -298,7 +301,8 @@ func (h *Handler) handleMarkDone(post *model.Post, botUserID, rootPostID, userMe
 
 	var marked []string
 	for _, name := range itemNames {
-		key, ok := itemIndex[strings.ToLower(name)]
+		cleanName := stripStatusPrefix(name)
+		key, ok := itemIndex[strings.ToLower(cleanName)]
 		if !ok {
 			h.API.LogWarn("CheckItem name returned by Claude not found in card", "name", name, "cardID", threadCard.CardID)
 			continue
@@ -307,7 +311,7 @@ func (h *Handler) handleMarkDone(post *model.Post, botUserID, rootPostID, userMe
 			h.API.LogError("Trello UpdateCheckItemState error", "error", updateErr.Error(), "item", name)
 			continue
 		}
-		marked = append(marked, name)
+		marked = append(marked, cleanName)
 	}
 
 	if len(marked) == 0 {
@@ -580,6 +584,17 @@ func parseCommand(msg string) (cmd, rest string) {
 }
 
 // stripBotMention removes the @botUsername mention from the message text.
+// stripStatusPrefix removes leading status markers (✅, ⬜) that Claude may copy
+// from the card context when returning checklist item names.
+func stripStatusPrefix(s string) string {
+	for _, pfx := range []string{"✅ ", "⬜ "} {
+		if strings.HasPrefix(s, pfx) {
+			return strings.TrimPrefix(s, pfx)
+		}
+	}
+	return s
+}
+
 func stripBotMention(message, botUsername string) string {
 	re := regexp.MustCompile(`(?i)@` + regexp.QuoteMeta(botUsername) + `\s*`)
 	return strings.TrimSpace(re.ReplaceAllString(message, ""))
