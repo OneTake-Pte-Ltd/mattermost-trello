@@ -114,7 +114,7 @@ type anthropicResponse struct {
 // model and maxTokens fall back to DefaultModel / DefaultMaxTokens when zero-valued.
 // additionalContext, if non-empty, is appended to the core system prompt so that
 // admin-supplied company/bot context reaches Claude without affecting output structure.
-func (c *Client) GenerateCardContent(userMessage, threadLink, model string, maxTokens int, additionalContext string) (*CardContent, error) {
+func (c *Client) GenerateCardContent(userMessage, threadContent, threadLink, model string, maxTokens int, additionalContext string) (*CardContent, error) {
 	if model == "" {
 		model = DefaultModel
 	}
@@ -127,10 +127,18 @@ func (c *Client) GenerateCardContent(userMessage, threadLink, model string, maxT
 		systemPmt += "\n\n" + additionalContext
 	}
 
-	userPrompt := fmt.Sprintf(
-		"Create a Trello card for the following issue. The Mattermost thread link is: %s\n\nIssue description: %s",
-		threadLink, userMessage,
-	)
+	var userPrompt string
+	if threadContent != "" {
+		userPrompt = fmt.Sprintf(
+			"Create a Trello card based on the following Mattermost thread. The thread link is: %s\n\nThread context:\n%s\n\n---\n\nUser's request: %s",
+			threadLink, threadContent, userMessage,
+		)
+	} else {
+		userPrompt = fmt.Sprintf(
+			"Create a Trello card for the following issue. The Mattermost thread link is: %s\n\nIssue description: %s",
+			threadLink, userMessage,
+		)
+	}
 
 	reqBody := anthropicRequest{
 		Model:     model,
