@@ -15,6 +15,9 @@
             "windows-amd64": "server/dist/plugin-windows-amd64.exe"
         }
     },
+    "webapp": {
+        "bundle_path": "webapp/dist/main.js"
+    },
     "settings_schema": {
         "header": "Configure the Mattermost Trello Bot. Each bot maps to a specific Trello board and list. See the README for setup instructions.",
         "footer": "",
@@ -50,10 +53,9 @@
             },
             {
                 "key": "BotConfigurations",
-                "display_name": "Bot Configurations (JSON)",
-                "type": "longtext",
-                "help_text": "A JSON array mapping bot usernames to Trello boards. Required fields per entry: botUsername, botDisplayName, trelloApiKey, trelloApiToken, trelloBoardId, trelloListId. Optional field: botContext (free-text describing this bot's role, personality, or style — appended after Global Context in every Anthropic call made by this bot). Example: [{\"botUsername\": \"therealpritish\", \"botDisplayName\": \"Pritish Bot\", \"trelloApiKey\": \"...\", \"trelloApiToken\": \"...\", \"trelloBoardId\": \"...\", \"trelloListId\": \"...\", \"botContext\": \"This bot handles engineering bugs. Be concise and technical.\"}]",
-                "placeholder": "[]"
+                "display_name": "Bot Configurations",
+                "type": "custom",
+                "help_text": ""
             }
         ]
     }

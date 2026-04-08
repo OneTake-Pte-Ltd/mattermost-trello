@@ -258,6 +258,72 @@ func (c *Client) UpdateCheckItemState(cardID, checklistID, checkItemID, state st
 	return nil
 }
 
+// AddMemberToCard looks up a Trello member by their username and adds them to the card.
+// It assumes the Trello username matches the Mattermost username (as configured).
+func (c *Client) AddMemberToCard(cardID, memberUsername string) error {
+	// Resolve username → Trello member ID.
+	lookupParams := url.Values{}
+	lookupParams.Set("key", c.APIKey)
+	lookupParams.Set("token", c.APIToken)
+
+	lookupReq, err := http.NewRequest(
+		http.MethodGet,
+		fmt.Sprintf("%s/members/%s?%s", baseURL, memberUsername, lookupParams.Encode()),
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("trello: failed to build get member request for %q: %w", memberUsername, err)
+	}
+
+	lookupResp, err := http.DefaultClient.Do(lookupReq)
+	if err != nil {
+		return fmt.Errorf("trello: failed to look up member %q: %w", memberUsername, err)
+	}
+	defer lookupResp.Body.Close()
+
+	if lookupResp.StatusCode >= 300 {
+		body, _ := io.ReadAll(lookupResp.Body)
+		return fmt.Errorf("trello: look up member %q returned status %d: %s", memberUsername, lookupResp.StatusCode, string(body))
+	}
+
+	var member struct {
+		ID string `json:"id"`
+	}
+	if err = json.NewDecoder(lookupResp.Body).Decode(&member); err != nil {
+		return fmt.Errorf("trello: failed to decode member response for %q: %w", memberUsername, err)
+	}
+	if member.ID == "" {
+		return fmt.Errorf("trello: member %q not found", memberUsername)
+	}
+
+	// Add the resolved member ID to the card.
+	addParams := url.Values{}
+	addParams.Set("key", c.APIKey)
+	addParams.Set("token", c.APIToken)
+	addParams.Set("value", member.ID)
+
+	addReq, err := http.NewRequest(
+		http.MethodPost,
+		fmt.Sprintf("%s/cards/%s/idMembers?%s", baseURL, cardID, addParams.Encode()),
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("trello: failed to build add member request: %w", err)
+	}
+
+	addResp, err := http.DefaultClient.Do(addReq)
+	if err != nil {
+		return fmt.Errorf("trello: failed to add member %q to card: %w", memberUsername, err)
+	}
+	defer addResp.Body.Close()
+
+	if addResp.StatusCode >= 300 {
+		body, _ := io.ReadAll(addResp.Body)
+		return fmt.Errorf("trello: add member %q to card returned status %d: %s", memberUsername, addResp.StatusCode, string(body))
+	}
+	return nil
+}
+
 // DeleteChecklist removes a checklist from a Trello card.
 func (c *Client) DeleteChecklist(checklistID string) error {
 	params := url.Values{}
