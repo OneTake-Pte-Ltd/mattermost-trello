@@ -121,9 +121,10 @@ func (h *Handler) handleCreateCard(post *model.Post, botUserID, rootPostID, mess
 
 	additionalContext := h.buildAdditionalContext(cfg)
 	threadLink := h.buildThreadLink(post, rootPostID)
+	threadContent := h.getThreadContent(rootPostID)
 
 	ac := &anthropic.Client{APIKey: cfg.AnthropicAPIKey}
-	content, err := ac.GenerateCardContent(messageText, threadLink, cfg.AnthropicModel, cfg.AnthropicMaxTokens, additionalContext)
+	content, err := ac.GenerateCardContent(messageText, threadContent, threadLink, cfg.AnthropicModel, cfg.AnthropicMaxTokens, additionalContext)
 	if err != nil {
 		h.API.LogError("Anthropic API error", "error", err.Error())
 		h.postAsBot(botUserID, post.ChannelId, rootPostID,
