@@ -105,9 +105,20 @@ After saving, the plugin registers each bot as a separate Mattermost user accoun
 
 Each bot only responds in channels where it has been **explicitly added as a member**. This is the primary security boundary — a bot configured for Team A's board cannot be invoked from Team B's channels.
 
-To add a bot to a channel:
+Before a bot can join any channel it must first be a member of the team. This is a required two-step process:
+
+**Step 1 — Add the bot to the team**
+
+1. Go to the team where you want the bot to operate.
+2. Open **Team Settings** (click the team name in the top-left) → **Members** → **Invite People**.
+3. Search for the bot's username (e.g. `trellobot`) and add it as a team member.
+
+Repeat this for every team the bot needs to serve.
+
+**Step 2 — Add the bot to each channel**
+
 1. Open the channel in Mattermost.
-2. Click **Add Members** (or use the channel header menu).
+2. Click the channel name at the top → **Add Members**.
 3. Search for the bot's username and add it.
 
 > **Why this matters**: Without channel membership, the bot ignores all mentions, even if the username is typed correctly. This prevents users in one channel from using a bot that is scoped to a different team's Trello board.
