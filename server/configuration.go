@@ -19,6 +19,10 @@ type BotConfig struct {
 	// It is appended to the global context (if any) and injected into every Anthropic call
 	// made by this bot, after the immutable JSON-output instructions.
 	BotContext string `json:"botContext"`
+	// AllowedUsers is an optional list of Mattermost usernames that are permitted to interact
+	// with this bot. When non-empty, the bot will respond only to messages from these users
+	// and politely decline all others. Usernames may optionally include a leading "@".
+	AllowedUsers []string `json:"allowedUsers,omitempty"`
 }
 
 // configuration captures the plugin's external configuration as exposed in the Mattermost server

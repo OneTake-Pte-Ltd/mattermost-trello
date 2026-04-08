@@ -8,10 +8,13 @@ import type {GlobalState} from '@mattermost/types/store';
 
 import type {PluginRegistry} from 'types/mattermost-webapp';
 
+import BotConfigSetting from './components/bot_config_setting';
+
 export default class Plugin {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-empty-function
     public async initialize(registry: PluginRegistry, store: Store<GlobalState>) {
-        // @see https://developers.mattermost.com/extend/plugins/webapp/reference/
+        // Register the custom CRUD component for the BotConfigurations setting.
+        // This replaces the raw JSON textarea with a user-friendly bot management UI.
+        registry.registerAdminConsoleCustomSetting('BotConfigurations', BotConfigSetting, {showTitle: true});
     }
 }
 

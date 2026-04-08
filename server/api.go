@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 )
 
@@ -63,18 +62,15 @@ func (p *Plugin) BotsStatus(w http.ResponseWriter, r *http.Request) {
 	if parseErr != nil {
 		results = []botResult{{Error: "BotConfigurations JSON parse error: " + parseErr.Error()}}
 	} else if len(botConfigs) == 0 {
-		results = []botResult{{Error: "BotConfigurations is empty — paste your JSON array and save the plugin settings first"}}
+		results = []botResult{{Error: "BotConfigurations is empty — configure bots in the plugin settings first"}}
 	} else {
 		for _, bc := range botConfigs {
 			res := botResult{Username: bc.BotUsername, DisplayName: bc.BotDisplayName}
 
-			botID, ensureErr := p.client.Bot.EnsureBot(&model.Bot{
-				Username:    bc.BotUsername,
-				DisplayName: bc.BotDisplayName,
-				Description: "Mattermost Trello Bot — creates and manages Trello cards from chat threads.",
-			})
-			if ensureErr != nil {
-				res.Error = ensureErr.Error()
+			// Use registerBotUser instead of EnsureBot to correctly support multiple bots.
+			botID, regErr := p.registerBotUser(bc)
+			if regErr != nil {
+				res.Error = regErr.Error()
 			} else {
 				res.UserID = botID
 				p.botMu.Lock()
@@ -107,7 +103,7 @@ func (p *Plugin) BotsStatus(w http.ResponseWriter, r *http.Request) {
 
 // buildTag is bumped on every meaningful release so admins can confirm
 // which binary is running via GET /api/v1/version.
-const buildTag = "v1.1.0"
+const buildTag = "v1.2.0"
 
 // Version returns the plugin build tag as JSON.
 func (p *Plugin) Version(w http.ResponseWriter, r *http.Request) {
@@ -123,3 +119,4 @@ func (p *Plugin) HelloWorld(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
+

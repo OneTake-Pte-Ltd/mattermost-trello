@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -150,6 +151,11 @@ func (p *Plugin) MessageHasBeenPosted(_ *plugin.Context, post *model.Post) {
 			continue
 		}
 
+		// Security: only respond if this bot is explicitly a member of the channel.
+		if _, memberErr := p.API.GetChannelMember(post.ChannelId, botUserID); memberErr != nil {
+			continue
+		}
+
 		h := &handler.Handler{
 			API:     p.API,
 			KVStore: p.kvstore,
@@ -163,6 +169,7 @@ func (p *Plugin) MessageHasBeenPosted(_ *plugin.Context, post *model.Post) {
 			TrelloBoardID:      bc.TrelloBoardID,
 			TrelloListID:       bc.TrelloListID,
 			BotContext:         bc.BotContext,
+			AllowedUsers:       bc.AllowedUsers,
 			AnthropicAPIKey:    cfg.AnthropicAPIKey,
 			AnthropicModel:     cfg.AnthropicModel,
 			AnthropicMaxTokens: maxTokens,
@@ -186,6 +193,29 @@ func (p *Plugin) MessageHasBeenPosted(_ *plugin.Context, post *model.Post) {
 	}
 }
 
+// registerBotUser creates or retrieves the Mattermost user account for a single bot.
+// It uses GetUserByUsername + CreateBot instead of EnsureBotUser/EnsureBot to avoid a
+// Mattermost server bug where EnsureBot stores only one bot ID per plugin (under the shared
+// key "mmi_botid") and renames the first bot to match the second bot's username rather than
+// creating a new user.
+func (p *Plugin) registerBotUser(bc BotConfig) (string, error) {
+	// If a Mattermost user already exists with this username (handles restart/upgrade).
+	if existingUser, appErr := p.API.GetUserByUsername(bc.BotUsername); appErr == nil {
+		return existingUser.Id, nil
+	}
+
+	// Create the bot user fresh, bypassing the shared "mmi_botid" KV key entirely.
+	createdBot, appErr := p.API.CreateBot(&model.Bot{
+		Username:    bc.BotUsername,
+		DisplayName: bc.BotDisplayName,
+		Description: "Mattermost Trello Bot — creates and manages Trello cards from chat threads.",
+	})
+	if appErr != nil {
+		return "", fmt.Errorf("failed to create bot user %q: %s", bc.BotUsername, appErr.Error())
+	}
+	return createdBot.UserId, nil
+}
+
 // ensureBots registers (or re-registers) all configured bot accounts with Mattermost.
 func (p *Plugin) ensureBots() error {
 	cfg := p.getConfiguration()
@@ -200,20 +230,33 @@ func (p *Plugin) ensureBots() error {
 	p.botMu.Lock()
 	defer p.botMu.Unlock()
 
+	// Snapshot the old set of registered bots so we can warn about any that were removed.
+	oldBotUsernames := make(map[string]struct{}, len(p.botUserIDs))
+	for username := range p.botUserIDs {
+		oldBotUsernames[username] = struct{}{}
+	}
+
+	// Rebuild the map from scratch.
+	p.botUserIDs = make(map[string]string, len(botConfigs))
+
 	for _, bc := range botConfigs {
-		botID, appErr := p.API.EnsureBotUser(&model.Bot{
-			Username:    bc.BotUsername,
-			DisplayName: bc.BotDisplayName,
-			Description: "Mattermost Trello Bot — creates and manages Trello cards from chat threads.",
-		})
-		if appErr != nil {
-			p.API.LogError("Failed to ensure bot user",
+		botID, regErr := p.registerBotUser(bc)
+		if regErr != nil {
+			p.API.LogError("Failed to register bot user",
 				"botUsername", bc.BotUsername,
-				"error", appErr.Error())
+				"error", regErr.Error())
 			continue
 		}
 		p.botUserIDs[bc.BotUsername] = botID
 		p.API.LogInfo("Bot registered", "botUsername", bc.BotUsername, "botUserID", botID)
+	}
+
+	// Warn about bot usernames that were removed from the configuration.
+	for oldUsername := range oldBotUsernames {
+		if _, stillConfigured := p.botUserIDs[oldUsername]; !stillConfigured {
+			p.API.LogWarn("Bot removed from configuration but its Mattermost user account remains; deactivate it manually if no longer needed",
+				"botUsername", oldUsername)
+		}
 	}
 
 	return nil

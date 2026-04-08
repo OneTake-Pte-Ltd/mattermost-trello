@@ -23,6 +23,9 @@ type BotConfig struct {
 	TrelloListID   string
 	// BotContext is optional per-bot context injected into Anthropic calls (appended after GlobalContext).
 	BotContext string
+	// AllowedUsers is an optional list of Mattermost usernames permitted to use this bot.
+	// When non-empty the bot politely refuses everyone else.
+	AllowedUsers []string
 	// Anthropic settings resolved from plugin configuration.
 	AnthropicAPIKey    string
 	AnthropicModel     string
@@ -50,6 +53,23 @@ func (h *Handler) Handle(post *model.Post, botUsername, botUserID string, cfg Bo
 		h.addReaction(botUserID, post.Id, "white_check_mark")
 	}()
 
+	// Check whether the posting user is allowed to use this bot.
+	if len(cfg.AllowedUsers) > 0 {
+		author := h.getPostAuthorUsername(post.UserId)
+		allowed := false
+		for _, u := range cfg.AllowedUsers {
+			if strings.EqualFold(strings.TrimPrefix(u, "@"), author) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			h.postAsBot(botUserID, post.ChannelId, rootPostID,
+				"I'm sorry, I'm only authorised to assist specific users in this channel. Please contact an admin if you think this is an error.")
+			return
+		}
+	}
+
 	messageText := stripBotMention(post.Message, botUsername)
 
 	threadCard, err := h.KVStore.GetThreadCard(rootPostID)
@@ -60,8 +80,11 @@ func (h *Handler) Handle(post *model.Post, botUsername, botUserID string, cfg Bo
 	cmd, rest := parseCommand(messageText)
 
 	switch {
+	case cmd == "linear":
+		// /linear works with or without a linked Trello card.
+		h.handleLinear(post, botUserID, rootPostID, rest, threadCard, cfg)
 	case cmd != "" && threadCard == nil:
-		// Slash commands require a linked Trello card.
+		// All other slash commands require a linked Trello card.
 		h.postAsBot(botUserID, post.ChannelId, rootPostID,
 			"No Trello card is linked to this thread yet. Mention me at the start of the thread to create one first.")
 	case cmd == "update":
@@ -72,10 +95,11 @@ func (h *Handler) Handle(post *model.Post, botUsername, botUserID string, cfg Bo
 		h.handleProgressQuery(post, botUserID, rootPostID, threadCard, cfg)
 	case cmd == "freestyle":
 		h.handleFreestyle(post, botUserID, rootPostID, threadCard, cfg)
-	case cmd == "linear":
-		h.handleLinear(post, botUserID, rootPostID, rest, threadCard, cfg)
+	case cmd == "comment":
+		h.handleComment(post, botUserID, rootPostID, rest, threadCard, cfg)
 	case threadCard != nil:
-		h.handleAddDetails(post, botUserID, rootPostID, messageText, threadCard, cfg)
+		// No command but a card is already linked — treat as an update request.
+		h.handleUpdateCard(post, botUserID, rootPostID, messageText, threadCard, cfg)
 	default:
 		h.handleCreateCard(post, botUserID, rootPostID, messageText, cfg)
 	}
@@ -123,6 +147,14 @@ func (h *Handler) handleCreateCard(post *model.Post, botUserID, rootPostID, mess
 		}
 	}
 
+	// Assign any @mentioned users (excluding the bot itself) as Trello card members.
+	for _, username := range extractMentions(messageText, cfg.BotUsername) {
+		if err := tc.AddMemberToCard(card.ID, username); err != nil {
+			h.API.LogWarn("Could not add Trello member to card", "username", username, "cardID", card.ID, "error", err.Error())
+			// Non-fatal.
+		}
+	}
+
 	if err = h.KVStore.SetThreadCard(rootPostID, &kvstore.ThreadCard{
 		CardID:      card.ID,
 		CardURL:     card.ShortURL,
@@ -131,32 +163,45 @@ func (h *Handler) handleCreateCard(post *model.Post, botUserID, rootPostID, mess
 		h.API.LogError("Failed to save thread card mapping", "error", err.Error())
 	}
 
-	h.postAsBot(botUserID, post.ChannelId, rootPostID,
-		fmt.Sprintf("I've created a Trello card: [%s](%s)\n\nReply in this thread to add more details or ask for `/progress`.", content.Title, card.ShortURL))
+	// Re-fetch the card so we can show the checklist immediately.
+	var msg string
+	if cardDetail, detailErr := tc.GetCardWithChecklists(card.ID); detailErr == nil {
+		msg = fmt.Sprintf("I've created a Trello card: [%s](%s)\n\n%s", content.Title, card.ShortURL, formatProgress(cardDetail))
+	} else {
+		msg = fmt.Sprintf("I've created a Trello card: [%s](%s)", content.Title, card.ShortURL)
+	}
+	h.postAsBot(botUserID, post.ChannelId, rootPostID, msg)
 }
 
-// handleAddDetails adds the user's follow-up message as a comment on the linked Trello card.
-func (h *Handler) handleAddDetails(post *model.Post, botUserID, rootPostID, messageText string, threadCard *kvstore.ThreadCard, cfg BotConfig) {
+// handleComment adds the user's message as a comment on the linked Trello card.
+// It is invoked by the /comment command.
+func (h *Handler) handleComment(post *model.Post, botUserID, rootPostID, messageText string, threadCard *kvstore.ThreadCard, cfg BotConfig) {
 	if cfg.TrelloAPIKey == "" || cfg.TrelloAPIToken == "" {
 		h.postAsBot(botUserID, post.ChannelId, rootPostID,
 			"Trello credentials are not configured for this bot. Please ask an admin to set them up.")
 		return
 	}
 
+	if messageText == "" {
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"Please provide the comment text after `/comment`.")
+		return
+	}
+
 	tc := &trello.Client{APIKey: cfg.TrelloAPIKey, APIToken: cfg.TrelloAPIToken}
 
 	author := h.getPostAuthorUsername(post.UserId)
-	commentText := fmt.Sprintf("**Update from @%s (via Mattermost):**\n\n%s", author, messageText)
+	commentText := fmt.Sprintf("**Comment from @%s (via Mattermost):**\n\n%s", author, messageText)
 
 	if err := tc.AddComment(threadCard.CardID, commentText); err != nil {
 		h.API.LogError("Trello AddComment error", "error", err.Error(), "cardID", threadCard.CardID)
 		h.postAsBot(botUserID, post.ChannelId, rootPostID,
-			"Something went wrong — I couldn't add that to the Trello card. Please try again or contact an admin.")
+			"Something went wrong — I couldn't add the comment to the Trello card. Please try again or contact an admin.")
 		return
 	}
 
 	h.postAsBot(botUserID, post.ChannelId, rootPostID,
-		fmt.Sprintf("Got it — I've added that to the [Trello card](%s).", threadCard.CardURL))
+		fmt.Sprintf("Got it — I've added your comment to the [Trello card](%s).", threadCard.CardURL))
 }
 
 // handleProgressQuery fetches the Trello card's checklist and posts a formatted progress summary.
@@ -365,39 +410,52 @@ func (h *Handler) handleFreestyle(post *model.Post, botUserID, rootPostID string
 	h.postAsBot(botUserID, post.ChannelId, rootPostID, lyrics)
 }
 
-// handleLinear generates a Linear issue body from the Trello card and Mattermost thread.
+// handleLinear generates a Linear issue body from the thread (and optionally the linked Trello card).
+// It works with or without a linked Trello card.
 func (h *Handler) handleLinear(post *model.Post, botUserID, rootPostID, userMessage string, threadCard *kvstore.ThreadCard, cfg BotConfig) {
-	if cfg.TrelloAPIKey == "" || cfg.TrelloAPIToken == "" {
-		h.postAsBot(botUserID, post.ChannelId, rootPostID,
-			"Trello credentials are not configured for this bot. Please ask an admin to set them up.")
-		return
-	}
 	if cfg.AnthropicAPIKey == "" {
 		h.postAsBot(botUserID, post.ChannelId, rootPostID,
 			"I'm not set up yet — please ask an admin to configure the Anthropic API key.")
 		return
 	}
 
-	tc := &trello.Client{APIKey: cfg.TrelloAPIKey, APIToken: cfg.TrelloAPIToken}
-	detail, err := tc.GetCardWithChecklists(threadCard.CardID)
-	if err != nil {
-		h.API.LogError("Trello GetCardWithChecklists error", "error", err.Error(), "cardID", threadCard.CardID)
-		h.postAsBot(botUserID, post.ChannelId, rootPostID,
-			"Something went wrong — I couldn't fetch the Trello card. Please try again or contact an admin.")
-		return
+	var cardContext string
+	if threadCard != nil {
+		if cfg.TrelloAPIKey == "" || cfg.TrelloAPIToken == "" {
+			h.postAsBot(botUserID, post.ChannelId, rootPostID,
+				"Trello credentials are not configured for this bot. Please ask an admin to set them up.")
+			return
+		}
+		tc := &trello.Client{APIKey: cfg.TrelloAPIKey, APIToken: cfg.TrelloAPIToken}
+		detail, err := tc.GetCardWithChecklists(threadCard.CardID)
+		if err != nil {
+			h.API.LogError("Trello GetCardWithChecklists error", "error", err.Error(), "cardID", threadCard.CardID)
+			h.postAsBot(botUserID, post.ChannelId, rootPostID,
+				"Something went wrong — I couldn't fetch the Trello card. Please try again or contact an admin.")
+			return
+		}
+		cardContext = formatCardContext(detail)
 	}
 
-	cardContext := formatCardContext(detail)
 	threadContent := h.getThreadContent(rootPostID)
 
 	var promptParts []string
-	promptParts = append(promptParts, cardContext)
+	if cardContext != "" {
+		promptParts = append(promptParts, cardContext)
+	}
 	if threadContent != "" {
 		promptParts = append(promptParts, "---\n\nMattermost Thread:\n"+threadContent)
 	}
 	if userMessage != "" {
 		promptParts = append(promptParts, "Additional notes: "+userMessage)
 	}
+
+	if len(promptParts) == 0 {
+		h.postAsBot(botUserID, post.ChannelId, rootPostID,
+			"Please provide some context — either link a Trello card to this thread first, or include a description after `/linear`.")
+		return
+	}
+
 	userPrompt := strings.Join(promptParts, "\n\n")
 
 	ac := &anthropic.Client{APIKey: cfg.AnthropicAPIKey}
@@ -570,7 +628,7 @@ func (h *Handler) getPostAuthorUsername(userID string) string {
 // parseCommand checks if the message starts with a known slash command.
 // Returns the command name (without slash) and the remaining text, or empty strings if no command found.
 func parseCommand(msg string) (cmd, rest string) {
-	known := []string{"update", "done", "progress", "freestyle", "linear"}
+	known := []string{"update", "done", "progress", "freestyle", "linear", "comment"}
 	for _, c := range known {
 		prefix := "/" + c
 		if strings.EqualFold(msg, prefix) {
@@ -583,7 +641,6 @@ func parseCommand(msg string) (cmd, rest string) {
 	return "", ""
 }
 
-// stripBotMention removes the @botUsername mention from the message text.
 // stripStatusPrefix removes leading status markers (✅, ⬜) that Claude may copy
 // from the card context when returning checklist item names.
 func stripStatusPrefix(s string) string {
@@ -595,7 +652,21 @@ func stripStatusPrefix(s string) string {
 	return s
 }
 
+// stripBotMention removes the @botUsername mention from the message text.
 func stripBotMention(message, botUsername string) string {
 	re := regexp.MustCompile(`(?i)@` + regexp.QuoteMeta(botUsername) + `\s*`)
 	return strings.TrimSpace(re.ReplaceAllString(message, ""))
+}
+
+// extractMentions returns all @username mentions in the message, excluding the bot itself.
+func extractMentions(message, botUsername string) []string {
+	re := regexp.MustCompile(`@([a-zA-Z0-9_\-\.]+)`)
+	matches := re.FindAllStringSubmatch(message, -1)
+	var out []string
+	for _, m := range matches {
+		if !strings.EqualFold(m[1], botUsername) {
+			out = append(out, m[1])
+		}
+	}
+	return out
 }
